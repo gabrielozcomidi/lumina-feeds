@@ -11,6 +11,9 @@ from homeassistant.helpers.selector import (
     SelectSelector,
     SelectSelectorConfig,
     SelectSelectorMode,
+    TextSelector,
+    TextSelectorConfig,
+    TextSelectorType,
 )
 
 from .const import (
@@ -119,7 +122,7 @@ class LuminaFeedsOptionsFlow(config_entries.OptionsFlow):
         return self.async_show_form(
             step_id="interests",
             data_schema=vol.Schema({
-                vol.Required("interests_text", description={"suggested_value": current_text}): str,
+                vol.Required("interests_text", description={"suggested_value": current_text}): TextSelector(TextSelectorConfig(multiline=True)),
             }),
         )
 
