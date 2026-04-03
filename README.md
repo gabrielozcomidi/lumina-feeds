@@ -1,8 +1,15 @@
-# Lumina Feeds
+<p align="center">
+  <img src="Lumina Logo.png" alt="Lumina Feeds" width="400">
+</p>
 
-Interest-based news and stock market integration for [Home Assistant](https://www.home-assistant.io/). Part of the [Lumina Cards](https://github.com/gabrielozcomidi/lumina-cards) collection.
+<p align="center">
+  Interest-based news and stock market integration for <a href="https://www.home-assistant.io/">Home Assistant</a>.<br>
+  Part of the <a href="https://github.com/gabrielozcomidi/lumina-cards">Lumina Cards</a> collection.
+</p>
 
-![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2024.1%2B-41BDF5?logo=homeassistant&logoColor=white)
+<p align="center">
+  <img src="https://img.shields.io/badge/Home%20Assistant-2024.1%2B-41BDF5?logo=homeassistant&logoColor=white" alt="Home Assistant">
+</p>
 
 ## What it does
 
