@@ -1,9 +1,12 @@
 """Config flow for Lumina Feeds integration."""
 
+import logging
+import aiohttp
 import voluptuous as vol
 
 from homeassistant import config_entries
 from homeassistant.core import callback
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
     DOMAIN,
@@ -13,7 +16,14 @@ from .const import (
     CONF_STOCK_INTERVAL,
     DEFAULT_NEWS_INTERVAL,
     DEFAULT_STOCK_INTERVAL,
+    YAHOO_SEARCH_URL,
 )
+
+_LOGGER = logging.getLogger(__name__)
+
+YAHOO_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+}
 
 
 class LuminaFeedsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -22,9 +32,8 @@ class LuminaFeedsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
 
     async def async_step_user(self, user_input=None):
-        """Handle the initial step — just confirm setup."""
+        """Handle the initial step."""
         if user_input is not None:
-            # Check if already configured
             await self.async_set_unique_id(DOMAIN)
             self._abort_if_unique_id_configured()
 
@@ -39,12 +48,7 @@ class LuminaFeedsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 },
             )
 
-        return self.async_show_form(
-            step_id="user",
-            description_placeholders={
-                "description": "Set up Lumina Feeds to get personalized news and stock data. You'll configure your interests and stocks in the next step."
-            },
-        )
+        return self.async_show_form(step_id="user")
 
     @staticmethod
     @callback
@@ -59,12 +63,13 @@ class LuminaFeedsOptionsFlow(config_entries.OptionsFlow):
     def __init__(self, config_entry):
         """Initialize options flow."""
         self._config_entry = config_entry
+        self._search_results: list[dict] = []
 
     async def async_step_init(self, user_input=None):
         """Main options menu."""
         return self.async_show_menu(
             step_id="init",
-            menu_options=["interests", "stocks", "intervals"],
+            menu_options=["interests", "stocks", "stock_search", "intervals"],
         )
 
     # ─── Interests ───────────────────────────────────
@@ -72,56 +77,40 @@ class LuminaFeedsOptionsFlow(config_entries.OptionsFlow):
     async def async_step_interests(self, user_input=None):
         """Manage news interests."""
         if user_input is not None:
-            # Parse the text areas into structured data
             interests = []
             raw = user_input.get("interests_text", "")
             for line in raw.strip().split("\n"):
                 line = line.strip()
                 if not line:
                     continue
-                # Format: "Name | keywords | language"
                 parts = [p.strip() for p in line.split("|")]
                 if len(parts) >= 2:
-                    interest = {
+                    interests.append({
                         "name": parts[0],
                         "keywords": parts[1],
                         "language": parts[2] if len(parts) > 2 else "en",
                         "max_items": 15,
-                    }
-                    interests.append(interest)
+                    })
 
             options = dict(self._config_entry.options)
             options[CONF_INTERESTS] = interests
             return self.async_create_entry(title="", data=options)
 
-        # Build current interests text
         current = self._config_entry.options.get(CONF_INTERESTS, [])
-        lines = []
-        for i in current:
-            lang = i.get("language", "en")
-            lines.append(f"{i['name']} | {i['keywords']} | {lang}")
-
+        lines = [f"{i['name']} | {i['keywords']} | {i.get('language', 'en')}" for i in current]
         current_text = "\n".join(lines) if lines else ""
 
         return self.async_show_form(
             step_id="interests",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(
-                        "interests_text",
-                        description={"suggested_value": current_text},
-                    ): str,
-                }
-            ),
-            description_placeholders={
-                "format_hint": "One interest per line: Name | keywords | language\nExample: Smart Home | home assistant, IoT | en"
-            },
+            data_schema=vol.Schema({
+                vol.Required("interests_text", description={"suggested_value": current_text}): str,
+            }),
         )
 
-    # ─── Stocks ──────────────────────────────────────
+    # ─── Stocks: Edit ────────────────────────────────
 
     async def async_step_stocks(self, user_input=None):
-        """Manage stock symbols."""
+        """Edit stock symbols manually."""
         if user_input is not None:
             raw = user_input.get("symbols_text", "")
             symbols = [s.strip().upper() for s in raw.split(",") if s.strip()]
@@ -135,18 +124,106 @@ class LuminaFeedsOptionsFlow(config_entries.OptionsFlow):
 
         return self.async_show_form(
             step_id="stocks",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(
-                        "symbols_text",
-                        description={"suggested_value": current_text},
-                    ): str,
-                }
-            ),
+            data_schema=vol.Schema({
+                vol.Required("symbols_text", description={"suggested_value": current_text}): str,
+            }),
+        )
+
+    # ─── Stocks: Search ──────────────────────────────
+
+    async def async_step_stock_search(self, user_input=None):
+        """Search for stocks by company name."""
+        errors = {}
+
+        if user_input is not None:
+            query = user_input.get("search_query", "").strip()
+            if query:
+                results = await self._search_yahoo(query)
+                if results:
+                    self._search_results = results
+                    return await self.async_step_stock_results()
+                else:
+                    errors["base"] = "no_results"
+
+        return self.async_show_form(
+            step_id="stock_search",
+            data_schema=vol.Schema({
+                vol.Required("search_query"): str,
+            }),
+            errors=errors,
+        )
+
+    async def async_step_stock_results(self, user_input=None):
+        """Show search results and let user pick."""
+        if user_input is not None:
+            selected = user_input.get("selected_symbols", [])
+            if selected:
+                options = dict(self._config_entry.options)
+                current = list(options.get(CONF_STOCKS, []))
+                for sym in selected:
+                    if sym.upper() not in [s.upper() for s in current]:
+                        current.append(sym.upper())
+                options[CONF_STOCKS] = current
+                return self.async_create_entry(title="", data=options)
+
+            return await self.async_step_stock_search()
+
+        if not self._search_results:
+            return await self.async_step_stock_search()
+
+        # Build options for multi-select
+        result_options = {
+            r["symbol"]: f"{r['symbol']} — {r['name']} ({r['exchange']})"
+            for r in self._search_results
+        }
+
+        return self.async_show_form(
+            step_id="stock_results",
+            data_schema=vol.Schema({
+                vol.Required("selected_symbols"): vol.All(
+                    vol.ensure_list, [vol.In(result_options)]
+                ),
+            }),
             description_placeholders={
-                "format_hint": "Comma-separated symbols: AAPL, MSFT, GOOGL, BTC-USD, ^GSPC"
+                "results_info": f"Found {len(self._search_results)} results. Select the ones to add:"
             },
         )
+
+    async def _search_yahoo(self, query: str) -> list[dict]:
+        """Search Yahoo Finance for stock symbols."""
+        try:
+            session = async_get_clientsession(self.hass)
+            url = YAHOO_SEARCH_URL.format(query=query)
+            async with session.get(
+                url, headers=YAHOO_HEADERS, timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status != 200:
+                    _LOGGER.warning("Lumina Feeds: Yahoo search HTTP %s", resp.status)
+                    return []
+                data = await resp.json()
+
+            quotes = data.get("quotes", [])
+            results = []
+            for q in quotes:
+                symbol = q.get("symbol", "")
+                name = q.get("shortname", "") or q.get("longname", "") or symbol
+                qtype = q.get("quoteType", "")
+                exchange = q.get("exchDisp", "") or q.get("exchange", "")
+
+                # Filter to stocks, ETFs, indices, crypto
+                if qtype in ("EQUITY", "ETF", "INDEX", "CRYPTOCURRENCY", "MUTUALFUND", "CURRENCY"):
+                    results.append({
+                        "symbol": symbol,
+                        "name": name,
+                        "type": qtype,
+                        "exchange": exchange,
+                    })
+
+            return results[:8]
+
+        except Exception as err:
+            _LOGGER.error("Lumina Feeds: Yahoo search error: %s", err)
+            return []
 
     # ─── Intervals ───────────────────────────────────
 
@@ -163,14 +240,12 @@ class LuminaFeedsOptionsFlow(config_entries.OptionsFlow):
 
         return self.async_show_form(
             step_id="intervals",
-            data_schema=vol.Schema(
-                {
-                    vol.Optional(CONF_NEWS_INTERVAL, default=news_int): vol.All(
-                        vol.Coerce(int), vol.Range(min=5, max=1440)
-                    ),
-                    vol.Optional(CONF_STOCK_INTERVAL, default=stock_int): vol.All(
-                        vol.Coerce(int), vol.Range(min=5, max=1440)
-                    ),
-                }
-            ),
+            data_schema=vol.Schema({
+                vol.Optional(CONF_NEWS_INTERVAL, default=news_int): vol.All(
+                    vol.Coerce(int), vol.Range(min=5, max=1440)
+                ),
+                vol.Optional(CONF_STOCK_INTERVAL, default=stock_int): vol.All(
+                    vol.Coerce(int), vol.Range(min=5, max=1440)
+                ),
+            }),
         )

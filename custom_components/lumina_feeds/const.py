@@ -14,3 +14,6 @@ GOOGLE_NEWS_RSS_URL = "https://news.google.com/rss/search?q={query}&hl={lang}&gl
 
 # v8 chart API — more reliable, doesn't require auth cookies
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=2d&includePrePost=false"
+
+# Yahoo Finance search/autocomplete API
+YAHOO_SEARCH_URL = "https://query2.finance.yahoo.com/v1/finance/search?q={query}&quotesCount=8&newsCount=0&listsCount=0"

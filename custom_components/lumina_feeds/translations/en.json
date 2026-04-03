@@ -14,7 +14,8 @@
         "description": "Choose what to configure:",
         "menu_options": {
           "interests": "News Interests",
-          "stocks": "Stock Symbols",
+          "stocks": "Edit Stock Symbols",
+          "stock_search": "Search & Add Stocks",
           "intervals": "Update Intervals"
         }
       },
@@ -26,10 +27,24 @@
         }
       },
       "stocks": {
-        "title": "Stock Symbols",
-        "description": "Comma-separated symbols.\nStocks: AAPL, MSFT, TSLA\nCrypto: BTC-USD, ETH-USD\nIndices: ^GSPC, ^DJI\nETFs: SPY, QQQ",
+        "title": "Edit Stock Symbols",
+        "description": "Edit or remove symbols. Comma-separated.\nStocks: AAPL, MSFT, TSLA\nCrypto: BTC-USD, ETH-USD\nIndices: ^GSPC, ^DJI\nETFs: SPY, QQQ",
         "data": {
           "symbols_text": "Symbols"
+        }
+      },
+      "stock_search": {
+        "title": "Search & Add Stocks",
+        "description": "Type a company name, stock symbol, or crypto name to search.\n\nExamples: **NVIDIA**, **Apple**, **Bitcoin**, **S&P 500**",
+        "data": {
+          "search_query": "Search"
+        }
+      },
+      "stock_results": {
+        "title": "Search Results",
+        "description": "Select the stocks you want to add:",
+        "data": {
+          "selected_symbols": "Select stocks to add"
         }
       },
       "intervals": {
@@ -40,6 +55,9 @@
           "stock_interval": "Stock interval (minutes)"
         }
       }
+    },
+    "error": {
+      "no_results": "No results found. Try a different search term."
     }
   }
 }
