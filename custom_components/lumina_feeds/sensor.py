@@ -61,15 +61,17 @@ async def async_setup_entry(
     for idx, interest in enumerate(options.get(CONF_INTERESTS, [])):
         name = interest.get("name", "News")
         keywords = interest.get("keywords", "")
+        url = interest.get("url", "")
         language = interest.get("language", "en")
         max_items = interest.get("max_items", 15)
 
-        if keywords:
+        if keywords or url:
             entities.append(
                 LuminaNewsSensor(
                     session=session,
                     name=name,
                     keywords=keywords,
+                    direct_url=url,
                     language=language,
                     max_items=max_items,
                     scan_interval=news_interval,
@@ -110,21 +112,21 @@ async def async_setup_entry(
 
 
 class LuminaNewsSensor(SensorEntity):
-    """Sensor for interest-based news from Google News RSS."""
+    """Sensor for news from RSS feeds (direct URL or Google News keywords)."""
 
     _attr_icon = "mdi:newspaper"
     _attr_should_poll = False
 
-    def __init__(self, session, name, keywords, language, max_items, scan_interval, entry_id, stagger_index=0):
+    def __init__(self, session, name, keywords, direct_url, language, max_items, scan_interval, entry_id, stagger_index=0):
         self._session = session
         self._feed_name = name
-        self._keywords = keywords
+        self._keywords = keywords or ""
+        self._direct_url = direct_url or ""
         self._language = language
         self._max_items = max_items
         self._scan_minutes = scan_interval
         self._stagger = stagger_index
         self._entries: list[dict[str, Any]] = []
-        self._first_update = True
         safe_name = name.lower().replace(" ", "_").replace("-", "_")
         self._attr_name = f"Lumina Feed {name}"
         self._attr_unique_id = f"lumina_feed_{safe_name}_{entry_id[:8]}"
@@ -139,6 +141,7 @@ class LuminaNewsSensor(SensorEntity):
             "entries": self._entries,
             "feed_name": self._feed_name,
             "keywords": self._keywords,
+            "url": self._direct_url,
             "language": self._language,
         }
 
@@ -148,7 +151,6 @@ class LuminaNewsSensor(SensorEntity):
             self.hass, self._async_update_handler,
             timedelta(minutes=self._scan_minutes),
         )
-        # Initial fetch (staggered)
         self.hass.async_create_task(self._initial_fetch())
 
     async def _initial_fetch(self) -> None:
@@ -163,19 +165,19 @@ class LuminaNewsSensor(SensorEntity):
         self.async_write_ha_state()
 
     async def async_update(self) -> None:
+        """Fetch and parse the RSS feed."""
         try:
-            parts = [k.strip() for k in self._keywords.split(",") if k.strip()]
-        self._first_update = False
-
-        try:
-            parts = [k.strip() for k in self._keywords.split(",") if k.strip()]
-            query = " OR ".join(parts)
-            encoded_query = quote_plus(query)
-            region = REGION_MAP.get(self._language, "US")
-
-            url = GOOGLE_NEWS_RSS_URL.format(
-                query=encoded_query, lang=self._language, region=region,
-            )
+            # Build URL: direct RSS or Google News search
+            if self._direct_url:
+                url = self._direct_url
+            else:
+                parts = [k.strip() for k in self._keywords.split(",") if k.strip()]
+                query = " OR ".join(parts)
+                encoded_query = quote_plus(query)
+                region = REGION_MAP.get(self._language, "US")
+                url = GOOGLE_NEWS_RSS_URL.format(
+                    query=encoded_query, lang=self._language, region=region,
+                )
 
             async with self._session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 if resp.status != 200:
@@ -189,17 +191,31 @@ class LuminaNewsSensor(SensorEntity):
             for entry in feed.entries[: self._max_items]:
                 title = entry.get("title", "")
                 source = ""
-                if " - " in title:
+
+                # Google News format: "Title - Source Name"
+                if not self._direct_url and " - " in title:
                     parts = title.rsplit(" - ", 1)
                     title = parts[0]
                     source = parts[1] if len(parts) > 1 else ""
 
+                # Direct feeds: use feed title or author as source
+                if self._direct_url and not source:
+                    source = entry.get("author", "") or feed.feed.get("title", "") or ""
+
+                # Extract clean summary (strip HTML tags)
+                raw_summary = entry.get("summary", "") or entry.get("description", "")
+                import re
+                clean_summary = re.sub(r'<[^>]+>', '', raw_summary).strip()
+                # Truncate to ~200 chars
+                if len(clean_summary) > 200:
+                    clean_summary = clean_summary[:197] + "..."
+
                 entries.append({
                     "title": title,
                     "source": source,
+                    "summary": clean_summary,
                     "published": entry.get("published", ""),
                     "link": entry.get("link", ""),
-                    "summary": entry.get("summary", ""),
                 })
 
             self._entries = entries

@@ -90,19 +90,30 @@ class LuminaFeedsOptionsFlow(config_entries.OptionsFlow):
                     continue
                 parts = [p.strip() for p in line.split("|")]
                 if len(parts) >= 2:
-                    interests.append({
+                    source = parts[1].strip()
+                    is_url = source.startswith("http://") or source.startswith("https://")
+                    interest = {
                         "name": parts[0],
-                        "keywords": parts[1],
-                        "language": parts[2] if len(parts) > 2 else "en",
                         "max_items": 15,
-                    })
+                    }
+                    if is_url:
+                        interest["url"] = source
+                    else:
+                        interest["keywords"] = source
+                        interest["language"] = parts[2] if len(parts) > 2 else "en"
+                    interests.append(interest)
 
             options = dict(self._config_entry.options)
             options[CONF_INTERESTS] = interests
             return self.async_create_entry(title="", data=options)
 
         current = self._config_entry.options.get(CONF_INTERESTS, [])
-        lines = [f"{i['name']} | {i['keywords']} | {i.get('language', 'en')}" for i in current]
+        lines = []
+        for i in current:
+            if i.get("url"):
+                lines.append(f"{i['name']} | {i['url']}")
+            else:
+                lines.append(f"{i['name']} | {i.get('keywords', '')} | {i.get('language', 'en')}")
         current_text = "\n".join(lines) if lines else ""
 
         return self.async_show_form(

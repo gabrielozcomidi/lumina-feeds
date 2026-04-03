@@ -21,7 +21,7 @@
       },
       "interests": {
         "title": "News Interests",
-        "description": "One interest per line.\nFormat: **Name | keywords | language**\n\nExample:\nSmart Home | home assistant, smart home, IoT | en\nTechnology | AI, artificial intelligence | en\nLocal News | Tel Aviv | he",
+        "description": "One feed per line. Two modes:\n\n**Direct RSS URL** (recommended for quality):\nTech | https://feeds.arstechnica.com/arstechnica/index\nBBC | https://feeds.bbci.co.uk/news/world/rss.xml\nVerge | https://www.theverge.com/rss/index.xml\n\n**Google News search** (keyword-based):\nSmart Home | home assistant, smart home | en\nLocal | Tel Aviv | he",
         "data": {
           "interests_text": "Interests"
         }
