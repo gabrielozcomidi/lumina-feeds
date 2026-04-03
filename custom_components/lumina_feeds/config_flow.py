@@ -107,9 +107,8 @@ class LuminaFeedsOptionsFlow(config_entries.OptionsFlow):
             step_id="interests",
             data_schema=vol.Schema(
                 {
-                    vol.Optional(
+                    vol.Required(
                         "interests_text",
-                        default=current_text,
                         description={"suggested_value": current_text},
                     ): str,
                 }
@@ -138,9 +137,8 @@ class LuminaFeedsOptionsFlow(config_entries.OptionsFlow):
             step_id="stocks",
             data_schema=vol.Schema(
                 {
-                    vol.Optional(
+                    vol.Required(
                         "symbols_text",
-                        default=current_text,
                         description={"suggested_value": current_text},
                     ): str,
                 }
