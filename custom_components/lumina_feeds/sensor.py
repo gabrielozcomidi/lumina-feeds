@@ -25,7 +25,7 @@ from .const import (
     DEFAULT_NEWS_INTERVAL,
     DEFAULT_STOCK_INTERVAL,
     GOOGLE_NEWS_RSS_URL,
-    YAHOO_QUOTE_URL,
+    YAHOO_CHART_URL,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -231,43 +231,52 @@ class LuminaStockSensor(SensorEntity):
         self.async_write_ha_state()
 
     async def async_update(self) -> None:
+        """Fetch stock data using Yahoo Finance v8 chart API."""
         try:
-            url = YAHOO_QUOTE_URL.format(symbols=self._symbol)
+            url = YAHOO_CHART_URL.format(symbol=self._symbol)
             async with self._session.get(
                 url, headers=YAHOO_HEADERS, timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
                 if resp.status != 200:
-                    _LOGGER.warning("Lumina Feeds: HTTP %s for stock %s", resp.status, self._symbol)
+                    _LOGGER.warning("Lumina Feeds: HTTP %s for stock %s (may be invalid symbol)", resp.status, self._symbol)
                     return
                 data = await resp.json()
 
-            results = data.get("quoteResponse", {}).get("result", [])
-            if not results:
+            chart = data.get("chart", {})
+            result = chart.get("result", [])
+            if not result:
+                error = chart.get("error", {})
+                _LOGGER.warning("Lumina Feeds: No data for %s: %s", self._symbol, error.get("description", "unknown"))
                 return
 
-            q = results[0]
-            price = q.get("regularMarketPrice", 0)
-            change = q.get("regularMarketChange", 0)
-            change_pct = q.get("regularMarketChangePercent", 0)
+            meta = result[0].get("meta", {})
+            price = meta.get("regularMarketPrice", 0)
+            prev_close = meta.get("chartPreviousClose", 0) or meta.get("previousClose", 0)
+            currency = meta.get("currency", "USD")
+            exchange = meta.get("exchangeName", "")
+            name = meta.get("shortName", "") or meta.get("symbol", self._symbol)
 
-            self._attr_unit_of_measurement = q.get("currency", "USD")
+            change = round(price - prev_close, 2) if prev_close else 0
+            change_pct = round((change / prev_close) * 100, 2) if prev_close else 0
+
+            # Map currency to symbol
+            currency_symbols = {"USD": "$", "EUR": "€", "GBP": "£", "ILS": "₪", "JPY": "¥", "BTC": "₿"}
+            currency_symbol = currency_symbols.get(currency, currency)
+
+            self._attr_unit_of_measurement = currency
             self._data = {
                 "symbol": self._symbol,
-                "short_name": q.get("shortName", self._symbol),
-                "long_name": q.get("longName", ""),
+                "short_name": name,
                 "price": round(price, 2),
                 "regular_market_price": round(price, 2),
-                "regular_market_previous_close": round(q.get("regularMarketPreviousClose", 0), 2),
-                "regular_market_change": round(change, 2),
-                "regular_market_change_percent": round(change_pct, 2),
-                "currency": q.get("currency", "USD"),
-                "currency_symbol": q.get("currencySymbol", "$"),
-                "market_state": q.get("marketState", "CLOSED"),
+                "regular_market_previous_close": round(prev_close, 2),
+                "regular_market_change": change,
+                "regular_market_change_percent": change_pct,
+                "currency": currency,
+                "currency_symbol": currency_symbol,
+                "market_state": meta.get("marketState", "CLOSED"),
                 "trending": "up" if change >= 0 else "down",
-                "regular_market_volume": q.get("regularMarketVolume", 0),
-                "fifty_day_average": round(q.get("fiftyDayAverage", 0), 2),
-                "two_hundred_day_average": round(q.get("twoHundredDayAverage", 0), 2),
-                "market_cap": q.get("marketCap", 0),
+                "exchange": exchange,
             }
 
         except asyncio.TimeoutError:
@@ -314,37 +323,50 @@ class LuminaStockSummarySensor(SensorEntity):
         self.async_write_ha_state()
 
     async def async_update(self) -> None:
-        try:
-            symbols_str = ",".join(self._symbols)
-            url = YAHOO_QUOTE_URL.format(symbols=symbols_str)
+        """Fetch all stocks using individual v8 chart API calls."""
+        currency_symbols = {"USD": "$", "EUR": "€", "GBP": "£", "ILS": "₪", "JPY": "¥", "BTC": "₿"}
+        stocks = []
 
-            async with self._session.get(
-                url, headers=YAHOO_HEADERS, timeout=aiohttp.ClientTimeout(total=20),
-            ) as resp:
-                if resp.status != 200:
-                    return
-                data = await resp.json()
+        for symbol in self._symbols:
+            try:
+                url = YAHOO_CHART_URL.format(symbol=symbol)
+                async with self._session.get(
+                    url, headers=YAHOO_HEADERS, timeout=aiohttp.ClientTimeout(total=15),
+                ) as resp:
+                    if resp.status != 200:
+                        _LOGGER.warning("Lumina Feeds: HTTP %s for summary stock %s", resp.status, symbol)
+                        continue
+                    data = await resp.json()
 
-            results = data.get("quoteResponse", {}).get("result", [])
-            stocks = []
-            for q in results:
-                price = q.get("regularMarketPrice", 0)
-                change = q.get("regularMarketChange", 0)
-                change_pct = q.get("regularMarketChangePercent", 0)
+                chart = data.get("chart", {})
+                result = chart.get("result", [])
+                if not result:
+                    continue
+
+                meta = result[0].get("meta", {})
+                price = meta.get("regularMarketPrice", 0)
+                prev_close = meta.get("chartPreviousClose", 0) or meta.get("previousClose", 0)
+                currency = meta.get("currency", "USD")
+                name = meta.get("shortName", "") or meta.get("symbol", symbol)
+
+                change = round(price - prev_close, 2) if prev_close else 0
+                change_pct = round((change / prev_close) * 100, 2) if prev_close else 0
+
                 stocks.append({
-                    "symbol": q.get("symbol", ""),
-                    "short_name": q.get("shortName", ""),
+                    "symbol": symbol,
+                    "short_name": name,
                     "price": round(price, 2),
-                    "change": round(change, 2),
-                    "change_percent": round(change_pct, 2),
-                    "currency": q.get("currency", "USD"),
-                    "currency_symbol": q.get("currencySymbol", "$"),
+                    "change": change,
+                    "change_percent": change_pct,
+                    "currency": currency,
+                    "currency_symbol": currency_symbols.get(currency, currency),
                     "trending": "up" if change >= 0 else "down",
-                    "market_state": q.get("marketState", "CLOSED"),
+                    "market_state": meta.get("marketState", "CLOSED"),
                 })
-            self._stocks = stocks
 
-        except asyncio.TimeoutError:
-            _LOGGER.warning("Lumina Feeds: Timeout fetching stock summary")
-        except Exception as err:
-            _LOGGER.error("Lumina Feeds: Error fetching stock summary: %s", err)
+            except asyncio.TimeoutError:
+                _LOGGER.warning("Lumina Feeds: Timeout fetching summary stock %s", symbol)
+            except Exception as err:
+                _LOGGER.error("Lumina Feeds: Error fetching summary stock %s: %s", symbol, err)
+
+        self._stocks = stocks

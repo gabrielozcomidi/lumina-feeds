@@ -11,4 +11,6 @@ DEFAULT_NEWS_INTERVAL = 30
 DEFAULT_STOCK_INTERVAL = 15
 
 GOOGLE_NEWS_RSS_URL = "https://news.google.com/rss/search?q={query}&hl={lang}&gl={region}&ceid={region}:{lang}"
-YAHOO_QUOTE_URL = "https://query1.finance.yahoo.com/v7/finance/quote?symbols={symbols}"
+
+# v8 chart API — more reliable, doesn't require auth cookies
+YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=2d&includePrePost=false"
