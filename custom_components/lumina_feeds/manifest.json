@@ -1,0 +1,12 @@
+{
+  "domain": "lumina_feeds",
+  "name": "Lumina Feeds",
+  "version": "1.0.0",
+  "documentation": "https://github.com/gabrielozcomidi/lumina-cards",
+  "issue_tracker": "https://github.com/gabrielozcomidi/lumina-cards/issues",
+  "dependencies": [],
+  "codeowners": ["@gabrielozcomidi"],
+  "requirements": ["feedparser>=6.0.0"],
+  "iot_class": "cloud_polling",
+  "config_flow": false
+}
