@@ -36,18 +36,6 @@ YAHOO_HEADERS = {
 }
 
 
-async def _delayed_update(entity: SensorEntity, delay: int) -> None:
-    """Delay initial update to stagger API calls."""
-    if delay > 0:
-        await asyncio.sleep(delay)
-    try:
-        await entity.async_update()
-        if hasattr(entity, 'async_write_ha_state'):
-            entity.async_write_ha_state()
-    except Exception as err:
-        _LOGGER.debug("Lumina Feeds: Delayed update error: %s", err)
-
-
 REGION_MAP = {
     "en": "US", "he": "IL", "de": "DE", "fr": "FR",
     "es": "ES", "it": "IT", "pt": "BR", "ja": "JP",
@@ -70,7 +58,7 @@ async def async_setup_entry(
     stock_interval = options.get(CONF_STOCK_INTERVAL, DEFAULT_STOCK_INTERVAL)
 
     # ── News Interest Sensors ──
-    for interest in options.get(CONF_INTERESTS, []):
+    for idx, interest in enumerate(options.get(CONF_INTERESTS, [])):
         name = interest.get("name", "News")
         keywords = interest.get("keywords", "")
         language = interest.get("language", "en")
@@ -86,6 +74,7 @@ async def async_setup_entry(
                     max_items=max_items,
                     scan_interval=news_interval,
                     entry_id=entry.entry_id,
+                    stagger_index=idx,
                 )
             )
 
@@ -113,9 +102,6 @@ async def async_setup_entry(
 
     if entities:
         async_add_entities(entities, update_before_add=False)
-        # Stagger initial updates to avoid rate limiting
-        for i, entity in enumerate(entities):
-            hass.async_create_task(_delayed_update(entity, i * 3))
 
 
 # ═══════════════════════════════════════════════════════
@@ -127,15 +113,18 @@ class LuminaNewsSensor(SensorEntity):
     """Sensor for interest-based news from Google News RSS."""
 
     _attr_icon = "mdi:newspaper"
+    _attr_should_poll = False
 
-    def __init__(self, session, name, keywords, language, max_items, scan_interval, entry_id):
+    def __init__(self, session, name, keywords, language, max_items, scan_interval, entry_id, stagger_index=0):
         self._session = session
         self._feed_name = name
         self._keywords = keywords
         self._language = language
         self._max_items = max_items
         self._scan_minutes = scan_interval
+        self._stagger = stagger_index
         self._entries: list[dict[str, Any]] = []
+        self._first_update = True
         safe_name = name.lower().replace(" ", "_").replace("-", "_")
         self._attr_name = f"Lumina Feed {name}"
         self._attr_unique_id = f"lumina_feed_{safe_name}_{entry_id[:8]}"
@@ -154,16 +143,30 @@ class LuminaNewsSensor(SensorEntity):
         }
 
     async def async_added_to_hass(self) -> None:
+        """Start periodic updates and trigger first fetch."""
         async_track_time_interval(
             self.hass, self._async_update_handler,
             timedelta(minutes=self._scan_minutes),
         )
+        # Initial fetch (staggered)
+        self.hass.async_create_task(self._initial_fetch())
+
+    async def _initial_fetch(self) -> None:
+        """First fetch with stagger delay."""
+        if self._stagger > 0:
+            await asyncio.sleep(self._stagger * 3)
+        await self.async_update()
+        self.async_write_ha_state()
 
     async def _async_update_handler(self, _now=None) -> None:
         await self.async_update()
         self.async_write_ha_state()
 
     async def async_update(self) -> None:
+        try:
+            parts = [k.strip() for k in self._keywords.split(",") if k.strip()]
+        self._first_update = False
+
         try:
             parts = [k.strip() for k in self._keywords.split(",") if k.strip()]
             query = " OR ".join(parts)
@@ -216,6 +219,7 @@ class LuminaStockSensor(SensorEntity):
     """Sensor for individual stock quote from Yahoo Finance."""
 
     _attr_icon = "mdi:chart-line"
+    _attr_should_poll = False
 
     def __init__(self, session, symbol, scan_interval, entry_id):
         self._session = session
@@ -236,10 +240,17 @@ class LuminaStockSensor(SensorEntity):
         return self._data
 
     async def async_added_to_hass(self) -> None:
+        """Start periodic updates and trigger first fetch."""
         async_track_time_interval(
             self.hass, self._async_update_handler,
             timedelta(minutes=self._scan_minutes),
         )
+        self.hass.async_create_task(self._safe_update())
+
+    async def _safe_update(self) -> None:
+        """Safely update and write state."""
+        await self.async_update()
+        self.async_write_ha_state()
 
     async def _async_update_handler(self, _now=None) -> None:
         await self.async_update()
@@ -310,6 +321,7 @@ class LuminaStockSummarySensor(SensorEntity):
 
     _attr_icon = "mdi:finance"
     _attr_name = "Lumina Stocks Summary"
+    _attr_should_poll = False
 
     def __init__(self, session, symbols, scan_interval, entry_id):
         self._session = session
@@ -331,6 +343,11 @@ class LuminaStockSummarySensor(SensorEntity):
             self.hass, self._async_update_handler,
             timedelta(minutes=self._scan_minutes),
         )
+        self.hass.async_create_task(self._safe_update())
+
+    async def _safe_update(self) -> None:
+        await self.async_update()
+        self.async_write_ha_state()
 
     async def _async_update_handler(self, _now=None) -> None:
         await self.async_update()
