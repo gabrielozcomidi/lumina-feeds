@@ -1,0 +1,45 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Lumina Feeds",
+        "description": "Set up personalized news and stock data.\n\nAfter setup, configure your interests and stocks in the integration options."
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Lumina Feeds Settings",
+        "description": "Choose what to configure:",
+        "menu_options": {
+          "interests": "News Interests",
+          "stocks": "Stock Symbols",
+          "intervals": "Update Intervals"
+        }
+      },
+      "interests": {
+        "title": "News Interests",
+        "description": "One interest per line.\nFormat: **Name | keywords | language**\n\nExample:\nSmart Home | home assistant, smart home, IoT | en\nTechnology | AI, artificial intelligence | en\nLocal News | Tel Aviv | he",
+        "data": {
+          "interests_text": "Interests"
+        }
+      },
+      "stocks": {
+        "title": "Stock Symbols",
+        "description": "Comma-separated symbols.\nStocks: AAPL, MSFT, TSLA\nCrypto: BTC-USD, ETH-USD\nIndices: ^GSPC, ^DJI\nETFs: SPY, QQQ",
+        "data": {
+          "symbols_text": "Symbols"
+        }
+      },
+      "intervals": {
+        "title": "Update Intervals",
+        "description": "How often to fetch new data (in minutes).",
+        "data": {
+          "news_interval": "News interval (minutes)",
+          "stock_interval": "Stock interval (minutes)"
+        }
+      }
+    }
+  }
+}
