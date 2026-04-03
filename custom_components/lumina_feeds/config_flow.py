@@ -7,6 +7,11 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.selector import (
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
+)
 
 from .const import (
     DOMAIN,
@@ -157,6 +162,8 @@ class LuminaFeedsOptionsFlow(config_entries.OptionsFlow):
         """Show search results and let user pick."""
         if user_input is not None:
             selected = user_input.get("selected_symbols", [])
+            if isinstance(selected, str):
+                selected = [selected]
             if selected:
                 options = dict(self._config_entry.options)
                 current = list(options.get(CONF_STOCKS, []))
@@ -171,22 +178,26 @@ class LuminaFeedsOptionsFlow(config_entries.OptionsFlow):
         if not self._search_results:
             return await self.async_step_stock_search()
 
-        # Build options for multi-select
-        result_options = {
-            r["symbol"]: f"{r['symbol']} — {r['name']} ({r['exchange']})"
+        # Build options for multi-select using HA's SelectSelector
+        select_options = [
+            {
+                "label": f"{r['symbol']} — {r['name']} ({r['exchange']})",
+                "value": r["symbol"],
+            }
             for r in self._search_results
-        }
+        ]
 
         return self.async_show_form(
             step_id="stock_results",
             data_schema=vol.Schema({
-                vol.Required("selected_symbols"): vol.All(
-                    vol.ensure_list, [vol.In(result_options)]
+                vol.Required("selected_symbols"): SelectSelector(
+                    SelectSelectorConfig(
+                        options=select_options,
+                        multiple=True,
+                        mode=SelectSelectorMode.LIST,
+                    )
                 ),
             }),
-            description_placeholders={
-                "results_info": f"Found {len(self._search_results)} results. Select the ones to add:"
-            },
         )
 
     async def _search_yahoo(self, query: str) -> list[dict]:
@@ -210,7 +221,6 @@ class LuminaFeedsOptionsFlow(config_entries.OptionsFlow):
                 qtype = q.get("quoteType", "")
                 exchange = q.get("exchDisp", "") or q.get("exchange", "")
 
-                # Filter to stocks, ETFs, indices, crypto
                 if qtype in ("EQUITY", "ETF", "INDEX", "CRYPTOCURRENCY", "MUTUALFUND", "CURRENCY"):
                     results.append({
                         "symbol": symbol,

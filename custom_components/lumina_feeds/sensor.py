@@ -31,8 +31,22 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 YAHOO_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Accept": "application/json",
 }
+
+
+async def _delayed_update(entity: SensorEntity, delay: int) -> None:
+    """Delay initial update to stagger API calls."""
+    if delay > 0:
+        await asyncio.sleep(delay)
+    try:
+        await entity.async_update()
+        if hasattr(entity, 'async_write_ha_state'):
+            entity.async_write_ha_state()
+    except Exception as err:
+        _LOGGER.debug("Lumina Feeds: Delayed update error: %s", err)
+
 
 REGION_MAP = {
     "en": "US", "he": "IL", "de": "DE", "fr": "FR",
@@ -98,7 +112,10 @@ async def async_setup_entry(
         )
 
     if entities:
-        async_add_entities(entities, update_before_add=True)
+        async_add_entities(entities, update_before_add=False)
+        # Stagger initial updates to avoid rate limiting
+        for i, entity in enumerate(entities):
+            hass.async_create_task(_delayed_update(entity, i * 3))
 
 
 # ═══════════════════════════════════════════════════════
@@ -110,7 +127,6 @@ class LuminaNewsSensor(SensorEntity):
     """Sensor for interest-based news from Google News RSS."""
 
     _attr_icon = "mdi:newspaper"
-    _attr_has_entity_name = True
 
     def __init__(self, session, name, keywords, language, max_items, scan_interval, entry_id):
         self._session = session
@@ -121,7 +137,7 @@ class LuminaNewsSensor(SensorEntity):
         self._scan_minutes = scan_interval
         self._entries: list[dict[str, Any]] = []
         safe_name = name.lower().replace(" ", "_").replace("-", "_")
-        self._attr_name = f"Feed {name}"
+        self._attr_name = f"Lumina Feed {name}"
         self._attr_unique_id = f"lumina_feed_{safe_name}_{entry_id[:8]}"
 
     @property
@@ -200,7 +216,6 @@ class LuminaStockSensor(SensorEntity):
     """Sensor for individual stock quote from Yahoo Finance."""
 
     _attr_icon = "mdi:chart-line"
-    _attr_has_entity_name = True
 
     def __init__(self, session, symbol, scan_interval, entry_id):
         self._session = session
@@ -208,7 +223,7 @@ class LuminaStockSensor(SensorEntity):
         self._scan_minutes = scan_interval
         self._data: dict[str, Any] = {}
         safe_id = symbol.lower().replace("^", "idx_").replace("-", "_")
-        self._attr_name = f"Stock {symbol}"
+        self._attr_name = f"Lumina Stock {symbol}"
         self._attr_unique_id = f"lumina_stock_{safe_id}_{entry_id[:8]}"
         self._attr_unit_of_measurement = "USD"
 
@@ -294,8 +309,7 @@ class LuminaStockSummarySensor(SensorEntity):
     """Summary sensor with all stocks as attributes."""
 
     _attr_icon = "mdi:finance"
-    _attr_has_entity_name = True
-    _attr_name = "Stocks Summary"
+    _attr_name = "Lumina Stocks Summary"
 
     def __init__(self, session, symbols, scan_interval, entry_id):
         self._session = session
