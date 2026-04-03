@@ -13,6 +13,7 @@ from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_time_interval
 
@@ -53,9 +54,11 @@ async def async_setup_entry(
     session = async_get_clientsession(hass)
     options = entry.options
     entities: list[SensorEntity] = []
+    expected_unique_ids: set[str] = set()
 
     news_interval = options.get(CONF_NEWS_INTERVAL, DEFAULT_NEWS_INTERVAL)
     stock_interval = options.get(CONF_STOCK_INTERVAL, DEFAULT_STOCK_INTERVAL)
+    eid8 = entry.entry_id[:8]
 
     # ── News Interest Sensors ──
     for idx, interest in enumerate(options.get(CONF_INTERESTS, [])):
@@ -101,6 +104,21 @@ async def async_setup_entry(
                 entry_id=entry.entry_id,
             )
         )
+
+    # Track expected unique_ids for cleanup
+    for e in entities:
+        if hasattr(e, '_attr_unique_id'):
+            expected_unique_ids.add(e._attr_unique_id)
+
+    # Clean up stale entities from registry (removed feeds/stocks)
+    try:
+        ent_reg = er.async_get(hass)
+        for ent_entry in er.async_entries_for_config_entry(ent_reg, entry.entry_id):
+            if ent_entry.unique_id not in expected_unique_ids:
+                _LOGGER.info("Lumina Feeds: Removing stale entity %s", ent_entry.entity_id)
+                ent_reg.async_remove(ent_entry.entity_id)
+    except Exception as err:
+        _LOGGER.debug("Lumina Feeds: Entity cleanup skipped: %s", err)
 
     if entities:
         async_add_entities(entities, update_before_add=False)
