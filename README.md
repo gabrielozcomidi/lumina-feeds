@@ -9,6 +9,16 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Home%20Assistant-2024.1%2B-41BDF5?logo=homeassistant&logoColor=white" alt="Home Assistant">
+  <img src="https://img.shields.io/github/v/release/gabrielozcomidi/lumina-feeds?label=release" alt="Latest release">
+</p>
+
+<p align="center">
+  <a href="https://my.home-assistant.io/redirect/hacs_repository/?owner=gabrielozcomidi&repository=lumina-feeds&category=integration">
+    <img src="https://my.home-assistant.io/badges/hacs_repository.svg" alt="Open this repository inside HACS on your Home Assistant instance.">
+  </a>
+  <a href="https://my.home-assistant.io/redirect/config_flow_start/?domain=lumina_feeds">
+    <img src="https://my.home-assistant.io/badges/config_flow_start.svg" alt="Add the Lumina Feeds integration to your Home Assistant instance.">
+  </a>
 </p>
 
 ## What it does
