@@ -1,7 +1,7 @@
 {
   "domain": "lumina_feeds",
   "name": "Lumina Feeds",
-  "version": "1.6.0",
+  "version": "1.6.1",
   "documentation": "https://github.com/gabrielozcomidi/lumina-feeds",
   "issue_tracker": "https://github.com/gabrielozcomidi/lumina-feeds/issues",
   "dependencies": [],

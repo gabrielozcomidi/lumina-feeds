@@ -15,8 +15,11 @@ PLATFORMS = ["sensor"]
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Lumina Feeds from a config entry."""
-    hass.data.setdefault(DOMAIN, {})
-    hass.data[DOMAIN][entry.entry_id] = entry
+    # Each entry gets its own dict — sensor.py stashes coordinators here so
+    # they survive across reloads (e.g. options updates). Previously this
+    # stored the ConfigEntry itself, which broke sensor.py's expectation of
+    # a dict and crashed setup with TypeError on `entry_data["news_coordinator"]`.
+    hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
 
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
 
