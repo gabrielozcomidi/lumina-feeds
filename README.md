@@ -27,39 +27,29 @@ Define your **interests as keywords** — the integration automatically fetches 
 
 ### Manual
 
-Copy `custom_components/lumina_feeds/` to your HA `config/custom_components/` directory.
+Copy `custom_components/lumina_feeds/` to your HA `config/custom_components/` directory and restart.
 
 ## Configuration
 
-Add to your `configuration.yaml`:
+Lumina Feeds is configured through the **Home Assistant UI** — no YAML required.
 
-```yaml
-lumina_feeds:
-  scan_interval: 30  # minutes for news (default: 30)
+1. Settings → **Devices & Services** → **Add Integration**
+2. Search for **Lumina Feeds**
+3. Add your interests (one per line, `Name | keywords` — keywords are comma-separated and OR-combined) and stock symbols
+4. Re-open the integration's **Configure** menu any time to add/edit interests, symbols, and scan intervals
 
-  interests:
-    - name: Smart Home
-      keywords: "home assistant, smart home, IoT"
-    - name: Technology
-      keywords: "AI, artificial intelligence, tech news"
-    - name: Finance
-      keywords: "stock market, crypto, investing"
-    - name: Local News
-      keywords: "Tel Aviv"
-      language: he
+Example interests:
 
-  stocks:
-    scan_interval: 15  # minutes for stocks (default: 15)
-    symbols:
-      - AAPL
-      - MSFT
-      - GOOGL
-      - TSLA
-      - BTC-USD    # crypto
-      - ^GSPC      # S&P 500 index
+```
+Smart Home | home assistant, smart home, IoT
+Technology | AI, artificial intelligence, tech news
+Finance | stock market, crypto, investing
+Local News | Tel Aviv
 ```
 
-Restart Home Assistant after adding the configuration.
+You can also paste a direct RSS URL instead of keywords for a specific feed.
+
+Example stock symbols: `AAPL`, `MSFT`, `GOOGL`, `TSLA`, `BTC-USD`, `^GSPC` (S&P 500 index).
 
 ## Entities Created
 
