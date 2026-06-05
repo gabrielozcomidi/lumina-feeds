@@ -1,6 +1,8 @@
 """Config flow for Lumina Feeds integration."""
 
 import logging
+import re
+
 import aiohttp
 import voluptuous as vol
 
@@ -25,7 +27,14 @@ from .const import (
     DEFAULT_NEWS_INTERVAL,
     DEFAULT_STOCK_INTERVAL,
     YAHOO_SEARCH_URL,
+    MAX_INTERESTS,
+    MAX_SYMBOLS,
+    MAX_LINE_LENGTH,
+    SYMBOL_PATTERN,
 )
+from .url_safety import is_safe_url
+
+_SYMBOL_RE = re.compile(SYMBOL_PATTERN)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -84,31 +93,15 @@ class LuminaFeedsOptionsFlow(config_entries.OptionsFlow):
 
     async def async_step_interests(self, user_input=None):
         """Manage news interests."""
-        if user_input is not None:
-            interests = []
-            raw = user_input.get("interests_text", "")
-            for line in raw.strip().split("\n"):
-                line = line.strip()
-                if not line:
-                    continue
-                parts = [p.strip() for p in line.split("|")]
-                if len(parts) >= 2:
-                    source = parts[1].strip()
-                    is_url = source.startswith("http://") or source.startswith("https://")
-                    interest = {
-                        "name": parts[0],
-                        "max_items": 15,
-                    }
-                    if is_url:
-                        interest["url"] = source
-                    else:
-                        interest["keywords"] = source
-                        interest["language"] = parts[2] if len(parts) > 2 else "en"
-                    interests.append(interest)
+        errors: dict[str, str] = {}
 
-            options = dict(self._config_entry.options)
-            options[CONF_INTERESTS] = interests
-            return self.async_create_entry(title="", data=options)
+        if user_input is not None:
+            raw = user_input.get("interests_text", "")
+            interests, errors = self._parse_interests(raw)
+            if not errors:
+                options = dict(self._config_entry.options)
+                options[CONF_INTERESTS] = interests
+                return self.async_create_entry(title="", data=options)
 
         current = self._config_entry.options.get(CONF_INTERESTS, [])
         lines = []
@@ -117,35 +110,82 @@ class LuminaFeedsOptionsFlow(config_entries.OptionsFlow):
                 lines.append(f"{i['name']} | {i['url']}")
             else:
                 lines.append(f"{i['name']} | {i.get('keywords', '')} | {i.get('language', 'en')}")
-        current_text = "\n".join(lines) if lines else ""
+        # On error, echo the user's submission back so they can edit it.
+        suggested = user_input.get("interests_text", "") if user_input else "\n".join(lines)
 
         return self.async_show_form(
             step_id="interests",
             data_schema=vol.Schema({
-                vol.Required("interests_text", description={"suggested_value": current_text}): TextSelector(TextSelectorConfig(multiline=True)),
+                vol.Required("interests_text", description={"suggested_value": suggested}): TextSelector(TextSelectorConfig(multiline=True)),
             }),
+            errors=errors,
         )
+
+    def _parse_interests(self, raw: str) -> tuple[list[dict], dict[str, str]]:
+        """Parse + validate the multiline interests blob."""
+        interests: list[dict] = []
+        errors: dict[str, str] = {}
+
+        for line in raw.strip().split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            if len(line) > MAX_LINE_LENGTH:
+                errors["base"] = "line_too_long"
+                return [], errors
+            parts = [p.strip() for p in line.split("|")]
+            if len(parts) < 2 or not parts[0] or not parts[1]:
+                continue
+            source = parts[1]
+            interest = {"name": parts[0], "max_items": 15}
+            if source.startswith(("http://", "https://")):
+                ok, reason = is_safe_url(source)
+                if not ok:
+                    errors["base"] = "unsafe_url" if reason in ("private_ip", "private_host") else "invalid_url"
+                    return [], errors
+                interest["url"] = source
+            else:
+                interest["keywords"] = source
+                interest["language"] = parts[2] if len(parts) > 2 else "en"
+            interests.append(interest)
+
+        if len(interests) > MAX_INTERESTS:
+            errors["base"] = "too_many_interests"
+            return [], errors
+
+        return interests, errors
 
     # ─── Stocks: Edit ────────────────────────────────
 
     async def async_step_stocks(self, user_input=None):
         """Edit stock symbols manually."""
+        errors: dict[str, str] = {}
+
         if user_input is not None:
             raw = user_input.get("symbols_text", "")
-            symbols = [s.strip().upper() for s in raw.split(",") if s.strip()]
-
-            options = dict(self._config_entry.options)
-            options[CONF_STOCKS] = symbols
-            return self.async_create_entry(title="", data=options)
+            if len(raw) > MAX_LINE_LENGTH * 4:
+                errors["base"] = "line_too_long"
+            else:
+                symbols = [s.strip().upper() for s in raw.split(",") if s.strip()]
+                invalid = [s for s in symbols if not _SYMBOL_RE.match(s)]
+                if invalid:
+                    errors["base"] = "invalid_symbol"
+                elif len(symbols) > MAX_SYMBOLS:
+                    errors["base"] = "too_many_symbols"
+                else:
+                    options = dict(self._config_entry.options)
+                    options[CONF_STOCKS] = symbols
+                    return self.async_create_entry(title="", data=options)
 
         current = self._config_entry.options.get(CONF_STOCKS, [])
-        current_text = ", ".join(current) if current else ""
+        suggested = user_input.get("symbols_text", "") if user_input else ", ".join(current)
 
         return self.async_show_form(
             step_id="stocks",
             data_schema=vol.Schema({
-                vol.Required("symbols_text", description={"suggested_value": current_text}): str,
+                vol.Required("symbols_text", description={"suggested_value": suggested}): str,
             }),
+            errors=errors,
         )
 
     # ─── Stocks: Search ──────────────────────────────

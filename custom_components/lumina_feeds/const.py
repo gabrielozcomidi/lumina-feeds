@@ -10,6 +10,15 @@ CONF_STOCK_INTERVAL = "stock_interval"
 DEFAULT_NEWS_INTERVAL = 30
 DEFAULT_STOCK_INTERVAL = 15
 
+# Defensive caps to keep a runaway/typo config from freezing HA.
+MAX_INTERESTS = 50
+MAX_SYMBOLS = 100
+MAX_LINE_LENGTH = 500
+
+# Valid Yahoo Finance symbol pattern: letters, digits, and a small set
+# of separators (e.g. AAPL, BTC-USD, ^GSPC, EURUSD=X, BRK.A).
+SYMBOL_PATTERN = r"^[A-Z0-9^.=\-]{1,20}$"
+
 GOOGLE_NEWS_RSS_URL = "https://news.google.com/rss/search?q={query}&hl={lang}&gl={region}&ceid={region}:{lang}"
 
 # v8 chart API — more reliable, doesn't require auth cookies
