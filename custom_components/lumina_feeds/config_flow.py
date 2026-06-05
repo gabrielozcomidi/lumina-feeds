@@ -3,7 +3,6 @@
 import logging
 import re
 
-import aiohttp
 import voluptuous as vol
 
 from homeassistant import config_entries
@@ -18,6 +17,7 @@ from homeassistant.helpers.selector import (
     TextSelectorType,
 )
 
+from .client import YahooClient
 from .const import (
     DOMAIN,
     CONF_INTERESTS,
@@ -26,7 +26,6 @@ from .const import (
     CONF_STOCK_INTERVAL,
     DEFAULT_NEWS_INTERVAL,
     DEFAULT_STOCK_INTERVAL,
-    YAHOO_SEARCH_URL,
     MAX_INTERESTS,
     MAX_SYMBOLS,
     MAX_LINE_LENGTH,
@@ -255,39 +254,9 @@ class LuminaFeedsOptionsFlow(config_entries.OptionsFlow):
         )
 
     async def _search_yahoo(self, query: str) -> list[dict]:
-        """Search Yahoo Finance for stock symbols."""
-        try:
-            session = async_get_clientsession(self.hass)
-            url = YAHOO_SEARCH_URL.format(query=query)
-            async with session.get(
-                url, headers=YAHOO_HEADERS, timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp:
-                if resp.status != 200:
-                    _LOGGER.warning("Lumina Feeds: Yahoo search HTTP %s", resp.status)
-                    return []
-                data = await resp.json()
-
-            quotes = data.get("quotes", [])
-            results = []
-            for q in quotes:
-                symbol = q.get("symbol", "")
-                name = q.get("shortname", "") or q.get("longname", "") or symbol
-                qtype = q.get("quoteType", "")
-                exchange = q.get("exchDisp", "") or q.get("exchange", "")
-
-                if qtype in ("EQUITY", "ETF", "INDEX", "CRYPTOCURRENCY", "MUTUALFUND", "CURRENCY"):
-                    results.append({
-                        "symbol": symbol,
-                        "name": name,
-                        "type": qtype,
-                        "exchange": exchange,
-                    })
-
-            return results[:8]
-
-        except Exception as err:
-            _LOGGER.error("Lumina Feeds: Yahoo search error: %s", err)
-            return []
+        """Search Yahoo Finance for stock symbols. Delegates to YahooClient."""
+        session = async_get_clientsession(self.hass)
+        return await YahooClient(session).search(query)
 
     # ─── Intervals ───────────────────────────────────
 

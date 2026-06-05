@@ -1,15 +1,15 @@
-"""Sensor platform for Lumina Feeds — news interests and stock quotes."""
+"""Lumina Feeds sensor entities.
 
-import asyncio
-import html
+After the Phase 4 refactor these are thin CoordinatorEntity subclasses —
+all HTTP/parsing lives in client.py and all scheduling in coordinator.py.
+Each entity just renders whatever the coordinator put in its data dict
+for the entity's key.
+"""
+
+from __future__ import annotations
+
 import logging
-import re
-from datetime import timedelta
 from typing import Any
-from urllib.parse import quote_plus, urlparse
-
-import aiohttp
-import feedparser
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -18,50 +18,24 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from .client import NewsClient, YahooClient, interest_key
 from .const import (
-    DOMAIN,
     CONF_INTERESTS,
-    CONF_STOCKS,
     CONF_NEWS_INTERVAL,
     CONF_STOCK_INTERVAL,
+    CONF_STOCKS,
     DEFAULT_NEWS_INTERVAL,
     DEFAULT_STOCK_INTERVAL,
-    GOOGLE_NEWS_RSS_URL,
-    YAHOO_CHART_URL,
+    DOMAIN,
 )
-from .url_safety import is_safe_url, resolve_is_safe
-
-# Match HTML tags for the summary cleaner. Compiled once at import.
-_HTML_TAG_RE = re.compile(r"<[^>]+>")
+from .coordinator import NewsCoordinator, StockCoordinator
 
 _LOGGER = logging.getLogger(__name__)
-
-YAHOO_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "Accept": "application/json",
-}
-
-
-REGION_MAP = {
-    "en": "US", "he": "IL", "de": "DE", "fr": "FR",
-    "es": "ES", "it": "IT", "pt": "BR", "ja": "JP",
-    "ko": "KR", "zh": "CN", "ar": "SA", "ru": "RU",
-    "nl": "NL", "sv": "SE", "da": "DK", "no": "NO",
-}
-
-_CURRENCY_SYMBOLS = {
-    "USD": "$", "EUR": "€", "GBP": "£", "ILS": "₪",
-    "JPY": "¥", "BTC": "₿", "AUD": "A$", "CAD": "C$",
-    "CHF": "Fr", "INR": "₹", "CNY": "¥", "KRW": "₩",
-    "HKD": "HK$", "SGD": "S$", "NZD": "NZ$", "SEK": "kr",
-    "NOK": "kr", "DKK": "kr", "MXN": "Mex$", "BRL": "R$",
-    "ZAR": "R", "TRY": "₺", "RUB": "₽", "PLN": "zł",
-}
 
 
 async def async_setup_entry(
@@ -72,445 +46,197 @@ async def async_setup_entry(
     """Set up Lumina Feeds sensors from a config entry."""
     session = async_get_clientsession(hass)
     options = entry.options
+
+    interests: list[dict[str, Any]] = options.get(CONF_INTERESTS, [])
+    symbols: list[str] = [s.upper() for s in options.get(CONF_STOCKS, [])]
+
     entities: list[SensorEntity] = []
     expected_unique_ids: set[str] = set()
 
-    news_interval = options.get(CONF_NEWS_INTERVAL, DEFAULT_NEWS_INTERVAL)
-    stock_interval = options.get(CONF_STOCK_INTERVAL, DEFAULT_STOCK_INTERVAL)
-    eid8 = entry.entry_id[:8]
+    # Store coordinators in hass.data so options-reload can replace them
+    # cleanly. Each entity holds a reference to its coordinator.
+    entry_data: dict[str, Any] = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
 
-    # ── News Interest Sensors ──
-    for idx, interest in enumerate(options.get(CONF_INTERESTS, [])):
-        name = interest.get("name", "News")
-        keywords = interest.get("keywords", "")
-        url = interest.get("url", "")
-        language = interest.get("language", "en")
-        max_items = interest.get("max_items", 15)
-
-        if keywords or url:
-            entities.append(
-                LuminaNewsSensor(
-                    session=session,
-                    name=name,
-                    keywords=keywords,
-                    direct_url=url,
-                    language=language,
-                    max_items=max_items,
-                    scan_interval=news_interval,
-                    entry_id=entry.entry_id,
-                    stagger_index=idx,
-                )
-            )
-
-    # ── Stock Sensors ──
-    symbols = options.get(CONF_STOCKS, [])
-    if symbols:
-        for symbol in symbols:
-            entities.append(
-                LuminaStockSensor(
-                    session=session,
-                    symbol=symbol.upper(),
-                    scan_interval=stock_interval,
-                    entry_id=entry.entry_id,
-                )
-            )
-        # Summary sensor
-        entities.append(
-            LuminaStockSummarySensor(
-                session=session,
-                symbols=[s.upper() for s in symbols],
-                scan_interval=stock_interval,
-                entry_id=entry.entry_id,
-            )
+    if interests:
+        news_client = NewsClient(hass, session)
+        news_coord = NewsCoordinator(
+            hass,
+            news_client,
+            interests,
+            options.get(CONF_NEWS_INTERVAL, DEFAULT_NEWS_INTERVAL),
         )
+        await news_coord.async_config_entry_first_refresh()
+        entry_data["news_coordinator"] = news_coord
+        for interest in interests:
+            if interest.get("keywords") or interest.get("url"):
+                entities.append(LuminaNewsSensor(news_coord, interest, entry.entry_id))
 
-    # Track expected unique_ids for cleanup
+    if symbols:
+        yahoo_client = YahooClient(session)
+        stock_coord = StockCoordinator(
+            hass,
+            yahoo_client,
+            symbols,
+            options.get(CONF_STOCK_INTERVAL, DEFAULT_STOCK_INTERVAL),
+        )
+        await stock_coord.async_config_entry_first_refresh()
+        entry_data["stock_coordinator"] = stock_coord
+        for symbol in symbols:
+            entities.append(LuminaStockSensor(stock_coord, symbol, entry.entry_id))
+        entities.append(LuminaStockSummarySensor(stock_coord, symbols, entry.entry_id))
+
     for e in entities:
-        if hasattr(e, '_attr_unique_id'):
-            expected_unique_ids.add(e._attr_unique_id)
+        if e.unique_id:
+            expected_unique_ids.add(e.unique_id)
 
-    # Clean up stale entities from registry (removed feeds/stocks)
+    # Clean up entities left over from removed interests/symbols.
     try:
         ent_reg = er.async_get(hass)
         for ent_entry in er.async_entries_for_config_entry(ent_reg, entry.entry_id):
             if ent_entry.unique_id not in expected_unique_ids:
                 _LOGGER.info("Lumina Feeds: Removing stale entity %s", ent_entry.entity_id)
                 ent_reg.async_remove(ent_entry.entity_id)
-    except Exception as err:
+    except Exception as err:  # noqa: BLE001
         _LOGGER.debug("Lumina Feeds: Entity cleanup skipped: %s", err)
 
     if entities:
-        async_add_entities(entities, update_before_add=False)
+        async_add_entities(entities)
 
 
-# ═══════════════════════════════════════════════════════
-# NEWS SENSOR
-# ═══════════════════════════════════════════════════════
+# ──────────────────────────────────────────────────────────────────────
+# News
+# ──────────────────────────────────────────────────────────────────────
 
 
-class LuminaNewsSensor(SensorEntity):
-    """Sensor for news from RSS feeds (direct URL or Google News keywords)."""
+class LuminaNewsSensor(CoordinatorEntity[NewsCoordinator], SensorEntity):
+    """News interest sensor — count of articles in state, articles in attrs."""
 
     _attr_icon = "mdi:newspaper"
-    _attr_should_poll = False
-    # The `entries` attribute can be up to ~5 KB per update; keep it out of
-    # the recorder DB. Other attributes are tiny and useful for history.
+    _attr_native_unit_of_measurement = "articles"
+    # entries[] can be ~5 KB per update — keep it out of the recorder DB.
     _unrecorded_attributes = frozenset({"entries"})
 
-    def __init__(self, session, name, keywords, direct_url, language, max_items, scan_interval, entry_id, stagger_index=0):
-        self._session = session
-        self._feed_name = name
-        self._keywords = keywords or ""
-        self._direct_url = direct_url or ""
-        self._language = language
-        self._max_items = max_items
-        self._scan_minutes = scan_interval
-        self._stagger = stagger_index
-        self._entries: list[dict[str, Any]] = []
-        self._attr_available = True
-        safe_name = name.lower().replace(" ", "_").replace("-", "_")
+    def __init__(
+        self,
+        coordinator: NewsCoordinator,
+        interest: dict[str, Any],
+        entry_id: str,
+    ) -> None:
+        super().__init__(coordinator)
+        self._interest = interest
+        self._key = interest_key(interest)
+        name = interest.get("name", "News")
+        safe = name.lower().replace(" ", "_").replace("-", "_")
         self._attr_name = f"Lumina Feed {name}"
-        self._attr_unique_id = f"lumina_feed_{safe_name}_{entry_id[:8]}"
+        self._attr_unique_id = f"lumina_feed_{safe}_{entry_id[:8]}"
 
     @property
-    def state(self) -> int:
+    def _entries(self) -> list[dict[str, Any]]:
+        data = self.coordinator.data or {}
+        return data.get(self._key) or []
+
+    @property
+    def native_value(self) -> int:
         return len(self._entries)
-
-    @property
-    def unit_of_measurement(self) -> str:
-        return "articles"
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         return {
             "entries": self._entries,
-            "feed_name": self._feed_name,
-            "keywords": self._keywords,
-            "url": self._direct_url,
-            "language": self._language,
+            "feed_name": self._interest.get("name", ""),
+            "keywords": self._interest.get("keywords", ""),
+            "url": self._interest.get("url", ""),
+            "language": self._interest.get("language", "en"),
         }
 
-    async def async_added_to_hass(self) -> None:
-        """Start periodic updates and trigger first fetch."""
-        async_track_time_interval(
-            self.hass, self._async_update_handler,
-            timedelta(minutes=self._scan_minutes),
-        )
-        self.hass.async_create_task(self._initial_fetch())
-
-    async def _initial_fetch(self) -> None:
-        """First fetch with stagger delay."""
-        if self._stagger > 0:
-            await asyncio.sleep(self._stagger * 3)
-        await self.async_update()
-        self.async_write_ha_state()
-
-    async def _async_update_handler(self, _now=None) -> None:
-        await self.async_update()
-        self.async_write_ha_state()
-
-    async def async_update(self) -> None:
-        """Fetch and parse the RSS feed."""
-        try:
-            # Build URL: direct RSS or Google News search
-            if self._direct_url:
-                ok, reason = is_safe_url(self._direct_url)
-                if not ok:
-                    _LOGGER.warning(
-                        "Lumina Feeds: Refusing to fetch %s — URL failed safety check (%s)",
-                        self._feed_name, reason,
-                    )
-                    self._attr_available = False
-                    return
-                host = (urlparse(self._direct_url).hostname or "").lower()
-                ok, reason = await resolve_is_safe(self.hass, host)
-                if not ok:
-                    _LOGGER.warning(
-                        "Lumina Feeds: Refusing to fetch %s — host resolves to private/unreachable address (%s)",
-                        self._feed_name, reason,
-                    )
-                    self._attr_available = False
-                    return
-                url = self._direct_url
-            else:
-                parts = [k.strip() for k in self._keywords.split(",") if k.strip()]
-                query = " OR ".join(parts)
-                encoded_query = quote_plus(query)
-                region = REGION_MAP.get(self._language, "US")
-                url = GOOGLE_NEWS_RSS_URL.format(
-                    query=encoded_query, lang=self._language, region=region,
-                )
-
-            async with self._session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                if resp.status != 200:
-                    _LOGGER.warning("Lumina Feeds: HTTP %s for %s", resp.status, self._feed_name)
-                    self._attr_available = False
-                    return
-                text = await resp.text()
-
-            feed = await self.hass.async_add_executor_job(feedparser.parse, text)
-
-            entries = []
-            for entry in feed.entries[: self._max_items]:
-                title = entry.get("title", "")
-                source = ""
-
-                # Google News format: "Title - Source Name"
-                if not self._direct_url and " - " in title:
-                    parts = title.rsplit(" - ", 1)
-                    title = parts[0]
-                    source = parts[1] if len(parts) > 1 else ""
-
-                # Direct feeds: use feed title or author as source
-                if self._direct_url and not source:
-                    source = entry.get("author", "") or feed.feed.get("title", "") or ""
-
-                # Extract clean summary: strip tags, decode entities (&amp; -> &), trim.
-                raw_summary = entry.get("summary", "") or entry.get("description", "")
-                clean_summary = html.unescape(_HTML_TAG_RE.sub("", raw_summary)).strip()
-                if len(clean_summary) > 200:
-                    clean_summary = clean_summary[:197] + "..."
-
-                entries.append({
-                    "title": html.unescape(title),
-                    "source": html.unescape(source),
-                    "summary": clean_summary,
-                    "published": entry.get("published", ""),
-                    "link": entry.get("link", ""),
-                })
-
-            self._entries = entries
-            self._attr_available = True
-
-        except asyncio.TimeoutError:
-            _LOGGER.warning("Lumina Feeds: Timeout fetching %s", self._feed_name)
-            self._attr_available = False
-        except aiohttp.ClientError as err:
-            _LOGGER.warning("Lumina Feeds: Network error fetching %s: %s", self._feed_name, err)
-            self._attr_available = False
-        except Exception as err:
-            _LOGGER.error("Lumina Feeds: Error fetching %s: %s", self._feed_name, err)
-            self._attr_available = False
+    @property
+    def available(self) -> bool:
+        # Coordinator's own availability + our key's data exists (not None).
+        if not super().available:
+            return False
+        data = self.coordinator.data or {}
+        return data.get(self._key) is not None
 
 
-# ═══════════════════════════════════════════════════════
-# STOCK SENSOR
-# ═══════════════════════════════════════════════════════
+# ──────────────────────────────────────────────────────────────────────
+# Stocks — individual
+# ──────────────────────────────────────────────────────────────────────
 
 
-class LuminaStockSensor(SensorEntity):
-    """Sensor for individual stock quote from Yahoo Finance."""
+class LuminaStockSensor(CoordinatorEntity[StockCoordinator], SensorEntity):
+    """Single-symbol stock price sensor."""
 
     _attr_icon = "mdi:chart-line"
-    _attr_should_poll = False
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_device_class = SensorDeviceClass.MONETARY
 
-    def __init__(self, session, symbol, scan_interval, entry_id):
-        self._session = session
+    def __init__(
+        self,
+        coordinator: StockCoordinator,
+        symbol: str,
+        entry_id: str,
+    ) -> None:
+        super().__init__(coordinator)
         self._symbol = symbol
-        self._scan_minutes = scan_interval
-        self._data: dict[str, Any] = {}
-        self._attr_available = True
-        safe_id = symbol.lower().replace("^", "idx_").replace("-", "_")
+        safe = symbol.lower().replace("^", "idx_").replace("-", "_")
         self._attr_name = f"Lumina Stock {symbol}"
-        self._attr_unique_id = f"lumina_stock_{safe_id}_{entry_id[:8]}"
-        # Default unit; refined to the actual currency once we have data.
-        self._attr_native_unit_of_measurement = "USD"
+        self._attr_unique_id = f"lumina_stock_{safe}_{entry_id[:8]}"
+        self._attr_native_unit_of_measurement = "USD"  # refined below from data
+
+    @property
+    def _data(self) -> dict[str, Any]:
+        return ((self.coordinator.data or {}).get(self._symbol)) or {}
 
     @property
     def native_value(self) -> float | None:
-        """Return the latest price as a float, or None when unavailable."""
         price = self._data.get("price")
         return float(price) if isinstance(price, (int, float)) else None
+
+    @property
+    def native_unit_of_measurement(self) -> str:
+        return self._data.get("currency") or "USD"
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         return self._data
 
-    async def async_added_to_hass(self) -> None:
-        """Start periodic updates and trigger first fetch."""
-        async_track_time_interval(
-            self.hass, self._async_update_handler,
-            timedelta(minutes=self._scan_minutes),
-        )
-        self.hass.async_create_task(self._safe_update())
-
-    async def _safe_update(self) -> None:
-        """Safely update and write state."""
-        await self.async_update()
-        self.async_write_ha_state()
-
-    async def _async_update_handler(self, _now=None) -> None:
-        await self.async_update()
-        self.async_write_ha_state()
-
-    async def async_update(self) -> None:
-        """Fetch stock data using Yahoo Finance v8 chart API."""
-        try:
-            url = YAHOO_CHART_URL.format(symbol=self._symbol)
-            async with self._session.get(
-                url, headers=YAHOO_HEADERS, timeout=aiohttp.ClientTimeout(total=15),
-            ) as resp:
-                if resp.status != 200:
-                    _LOGGER.warning("Lumina Feeds: HTTP %s for stock %s (may be invalid symbol)", resp.status, self._symbol)
-                    self._attr_available = False
-                    return
-                data = await resp.json()
-
-            chart = data.get("chart", {})
-            result = chart.get("result", [])
-            if not result:
-                error = chart.get("error", {})
-                _LOGGER.warning("Lumina Feeds: No data for %s: %s", self._symbol, error.get("description", "unknown"))
-                self._attr_available = False
-                return
-
-            meta = result[0].get("meta", {})
-            price = meta.get("regularMarketPrice", 0)
-            prev_close = meta.get("chartPreviousClose", 0) or meta.get("previousClose", 0)
-            currency = meta.get("currency", "USD")
-            exchange = meta.get("exchangeName", "")
-            name = meta.get("shortName", "") or meta.get("symbol", self._symbol)
-
-            change = round(price - prev_close, 2) if prev_close else 0
-            change_pct = round((change / prev_close) * 100, 2) if prev_close else 0
-
-            currency_symbol = _CURRENCY_SYMBOLS.get(currency, currency)
-
-            self._attr_native_unit_of_measurement = currency
-            self._data = {
-                "symbol": self._symbol,
-                "short_name": name,
-                "price": round(price, 2),
-                "regular_market_price": round(price, 2),
-                "regular_market_previous_close": round(prev_close, 2),
-                "regular_market_change": change,
-                "regular_market_change_percent": change_pct,
-                "currency": currency,
-                "currency_symbol": currency_symbol,
-                "market_state": meta.get("marketState", "CLOSED"),
-                "trending": "up" if change >= 0 else "down",
-                "exchange": exchange,
-            }
-            self._attr_available = True
-
-        except asyncio.TimeoutError:
-            _LOGGER.warning("Lumina Feeds: Timeout fetching stock %s", self._symbol)
-            self._attr_available = False
-        except aiohttp.ClientError as err:
-            _LOGGER.warning("Lumina Feeds: Network error fetching stock %s: %s", self._symbol, err)
-            self._attr_available = False
-        except Exception as err:
-            _LOGGER.error("Lumina Feeds: Error fetching stock %s: %s", self._symbol, err)
-            self._attr_available = False
+    @property
+    def available(self) -> bool:
+        return super().available and bool(self._data)
 
 
-# ═══════════════════════════════════════════════════════
-# STOCK SUMMARY SENSOR
-# ═══════════════════════════════════════════════════════
+# ──────────────────────────────────────────────────────────────────────
+# Stocks — summary
+# ──────────────────────────────────────────────────────────────────────
 
 
-class LuminaStockSummarySensor(SensorEntity):
-    """Summary sensor with all stocks as attributes."""
+class LuminaStockSummarySensor(CoordinatorEntity[StockCoordinator], SensorEntity):
+    """Aggregate sensor — count in state, all quotes in attributes."""
 
     _attr_icon = "mdi:finance"
     _attr_name = "Lumina Stocks Summary"
-    _attr_should_poll = False
-    # `stocks` is ~10 entries × 9 fields; keep it out of the recorder.
+    _attr_native_unit_of_measurement = "stocks"
     _unrecorded_attributes = frozenset({"stocks"})
 
-    def __init__(self, session, symbols, scan_interval, entry_id):
-        self._session = session
+    def __init__(
+        self,
+        coordinator: StockCoordinator,
+        symbols: list[str],
+        entry_id: str,
+    ) -> None:
+        super().__init__(coordinator)
         self._symbols = symbols
-        self._scan_minutes = scan_interval
-        self._stocks: list[dict[str, Any]] = []
-        self._attr_available = True
         self._attr_unique_id = f"lumina_stocks_summary_{entry_id[:8]}"
 
     @property
-    def state(self) -> int:
-        return len(self._stocks)
+    def _stocks(self) -> list[dict[str, Any]]:
+        data = self.coordinator.data or {}
+        return [data[s] for s in self._symbols if data.get(s)]
 
     @property
-    def unit_of_measurement(self) -> str:
-        return "stocks"
+    def native_value(self) -> int:
+        return len(self._stocks)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         return {"stocks": self._stocks, "symbols": self._symbols}
-
-    async def async_added_to_hass(self) -> None:
-        async_track_time_interval(
-            self.hass, self._async_update_handler,
-            timedelta(minutes=self._scan_minutes),
-        )
-        self.hass.async_create_task(self._safe_update())
-
-    async def _safe_update(self) -> None:
-        await self.async_update()
-        self.async_write_ha_state()
-
-    async def _async_update_handler(self, _now=None) -> None:
-        await self.async_update()
-        self.async_write_ha_state()
-
-    async def async_update(self) -> None:
-        """Fetch all stocks concurrently using v8 chart API."""
-        results = await asyncio.gather(
-            *(self._fetch_one(s) for s in self._symbols),
-            return_exceptions=True,
-        )
-        stocks = [r for r in results if isinstance(r, dict)]
-        self._stocks = stocks
-        # Available as long as we got at least one — partial outages still
-        # produce useful data for the cards that consume this sensor.
-        self._attr_available = bool(stocks) or not self._symbols
-
-    async def _fetch_one(self, symbol: str) -> dict[str, Any] | None:
-        """Fetch a single stock; returns None on any error (logged)."""
-        try:
-            url = YAHOO_CHART_URL.format(symbol=symbol)
-            async with self._session.get(
-                url, headers=YAHOO_HEADERS, timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp:
-                if resp.status != 200:
-                    _LOGGER.warning("Lumina Feeds: HTTP %s for summary stock %s", resp.status, symbol)
-                    return None
-                data = await resp.json()
-
-            chart = data.get("chart", {})
-            result = chart.get("result", [])
-            if not result:
-                return None
-
-            meta = result[0].get("meta", {})
-            price = meta.get("regularMarketPrice", 0)
-            prev_close = meta.get("chartPreviousClose", 0) or meta.get("previousClose", 0)
-            currency = meta.get("currency", "USD")
-            name = meta.get("shortName", "") or meta.get("symbol", symbol)
-
-            change = round(price - prev_close, 2) if prev_close else 0
-            change_pct = round((change / prev_close) * 100, 2) if prev_close else 0
-
-            return {
-                "symbol": symbol,
-                "short_name": name,
-                "price": round(price, 2),
-                "change": change,
-                "change_percent": change_pct,
-                "currency": currency,
-                "currency_symbol": _CURRENCY_SYMBOLS.get(currency, currency),
-                "trending": "up" if change >= 0 else "down",
-                "market_state": meta.get("marketState", "CLOSED"),
-            }
-
-        except asyncio.TimeoutError:
-            _LOGGER.warning("Lumina Feeds: Timeout fetching summary stock %s", symbol)
-            return None
-        except aiohttp.ClientError as err:
-            _LOGGER.warning("Lumina Feeds: Network error fetching summary stock %s: %s", symbol, err)
-            return None
-        except Exception as err:
-            _LOGGER.error("Lumina Feeds: Error fetching summary stock %s: %s", symbol, err)
-            return None
