@@ -1,15 +1,21 @@
 """Sensor platform for Lumina Feeds — news interests and stock quotes."""
 
-import logging
 import asyncio
+import html
+import logging
+import re
 from datetime import timedelta
-from urllib.parse import quote_plus
 from typing import Any
+from urllib.parse import quote_plus, urlparse
 
 import aiohttp
 import feedparser
 
-from homeassistant.components.sensor import SensorEntity
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntity,
+    SensorStateClass,
+)
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -28,6 +34,10 @@ from .const import (
     GOOGLE_NEWS_RSS_URL,
     YAHOO_CHART_URL,
 )
+from .url_safety import is_safe_url, resolve_is_safe
+
+# Match HTML tags for the summary cleaner. Compiled once at import.
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -42,6 +52,15 @@ REGION_MAP = {
     "es": "ES", "it": "IT", "pt": "BR", "ja": "JP",
     "ko": "KR", "zh": "CN", "ar": "SA", "ru": "RU",
     "nl": "NL", "sv": "SE", "da": "DK", "no": "NO",
+}
+
+_CURRENCY_SYMBOLS = {
+    "USD": "$", "EUR": "€", "GBP": "£", "ILS": "₪",
+    "JPY": "¥", "BTC": "₿", "AUD": "A$", "CAD": "C$",
+    "CHF": "Fr", "INR": "₹", "CNY": "¥", "KRW": "₩",
+    "HKD": "HK$", "SGD": "S$", "NZD": "NZ$", "SEK": "kr",
+    "NOK": "kr", "DKK": "kr", "MXN": "Mex$", "BRL": "R$",
+    "ZAR": "R", "TRY": "₺", "RUB": "₽", "PLN": "zł",
 }
 
 
@@ -134,6 +153,9 @@ class LuminaNewsSensor(SensorEntity):
 
     _attr_icon = "mdi:newspaper"
     _attr_should_poll = False
+    # The `entries` attribute can be up to ~5 KB per update; keep it out of
+    # the recorder DB. Other attributes are tiny and useful for history.
+    _unrecorded_attributes = frozenset({"entries"})
 
     def __init__(self, session, name, keywords, direct_url, language, max_items, scan_interval, entry_id, stagger_index=0):
         self._session = session
@@ -145,13 +167,18 @@ class LuminaNewsSensor(SensorEntity):
         self._scan_minutes = scan_interval
         self._stagger = stagger_index
         self._entries: list[dict[str, Any]] = []
+        self._attr_available = True
         safe_name = name.lower().replace(" ", "_").replace("-", "_")
         self._attr_name = f"Lumina Feed {name}"
         self._attr_unique_id = f"lumina_feed_{safe_name}_{entry_id[:8]}"
 
     @property
-    def state(self) -> str:
-        return f"{len(self._entries)} articles"
+    def state(self) -> int:
+        return len(self._entries)
+
+    @property
+    def unit_of_measurement(self) -> str:
+        return "articles"
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -187,6 +214,23 @@ class LuminaNewsSensor(SensorEntity):
         try:
             # Build URL: direct RSS or Google News search
             if self._direct_url:
+                ok, reason = is_safe_url(self._direct_url)
+                if not ok:
+                    _LOGGER.warning(
+                        "Lumina Feeds: Refusing to fetch %s — URL failed safety check (%s)",
+                        self._feed_name, reason,
+                    )
+                    self._attr_available = False
+                    return
+                host = (urlparse(self._direct_url).hostname or "").lower()
+                ok, reason = await resolve_is_safe(self.hass, host)
+                if not ok:
+                    _LOGGER.warning(
+                        "Lumina Feeds: Refusing to fetch %s — host resolves to private/unreachable address (%s)",
+                        self._feed_name, reason,
+                    )
+                    self._attr_available = False
+                    return
                 url = self._direct_url
             else:
                 parts = [k.strip() for k in self._keywords.split(",") if k.strip()]
@@ -200,6 +244,7 @@ class LuminaNewsSensor(SensorEntity):
             async with self._session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 if resp.status != 200:
                     _LOGGER.warning("Lumina Feeds: HTTP %s for %s", resp.status, self._feed_name)
+                    self._attr_available = False
                     return
                 text = await resp.text()
 
@@ -220,28 +265,32 @@ class LuminaNewsSensor(SensorEntity):
                 if self._direct_url and not source:
                     source = entry.get("author", "") or feed.feed.get("title", "") or ""
 
-                # Extract clean summary (strip HTML tags)
+                # Extract clean summary: strip tags, decode entities (&amp; -> &), trim.
                 raw_summary = entry.get("summary", "") or entry.get("description", "")
-                import re
-                clean_summary = re.sub(r'<[^>]+>', '', raw_summary).strip()
-                # Truncate to ~200 chars
+                clean_summary = html.unescape(_HTML_TAG_RE.sub("", raw_summary)).strip()
                 if len(clean_summary) > 200:
                     clean_summary = clean_summary[:197] + "..."
 
                 entries.append({
-                    "title": title,
-                    "source": source,
+                    "title": html.unescape(title),
+                    "source": html.unescape(source),
                     "summary": clean_summary,
                     "published": entry.get("published", ""),
                     "link": entry.get("link", ""),
                 })
 
             self._entries = entries
+            self._attr_available = True
 
         except asyncio.TimeoutError:
             _LOGGER.warning("Lumina Feeds: Timeout fetching %s", self._feed_name)
+            self._attr_available = False
+        except aiohttp.ClientError as err:
+            _LOGGER.warning("Lumina Feeds: Network error fetching %s: %s", self._feed_name, err)
+            self._attr_available = False
         except Exception as err:
             _LOGGER.error("Lumina Feeds: Error fetching %s: %s", self._feed_name, err)
+            self._attr_available = False
 
 
 # ═══════════════════════════════════════════════════════
@@ -254,20 +303,26 @@ class LuminaStockSensor(SensorEntity):
 
     _attr_icon = "mdi:chart-line"
     _attr_should_poll = False
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_device_class = SensorDeviceClass.MONETARY
 
     def __init__(self, session, symbol, scan_interval, entry_id):
         self._session = session
         self._symbol = symbol
         self._scan_minutes = scan_interval
         self._data: dict[str, Any] = {}
+        self._attr_available = True
         safe_id = symbol.lower().replace("^", "idx_").replace("-", "_")
         self._attr_name = f"Lumina Stock {symbol}"
         self._attr_unique_id = f"lumina_stock_{safe_id}_{entry_id[:8]}"
-        self._attr_unit_of_measurement = "USD"
+        # Default unit; refined to the actual currency once we have data.
+        self._attr_native_unit_of_measurement = "USD"
 
     @property
-    def state(self) -> float | str:
-        return self._data.get("price", 0)
+    def native_value(self) -> float | None:
+        """Return the latest price as a float, or None when unavailable."""
+        price = self._data.get("price")
+        return float(price) if isinstance(price, (int, float)) else None
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -299,6 +354,7 @@ class LuminaStockSensor(SensorEntity):
             ) as resp:
                 if resp.status != 200:
                     _LOGGER.warning("Lumina Feeds: HTTP %s for stock %s (may be invalid symbol)", resp.status, self._symbol)
+                    self._attr_available = False
                     return
                 data = await resp.json()
 
@@ -307,6 +363,7 @@ class LuminaStockSensor(SensorEntity):
             if not result:
                 error = chart.get("error", {})
                 _LOGGER.warning("Lumina Feeds: No data for %s: %s", self._symbol, error.get("description", "unknown"))
+                self._attr_available = False
                 return
 
             meta = result[0].get("meta", {})
@@ -319,11 +376,9 @@ class LuminaStockSensor(SensorEntity):
             change = round(price - prev_close, 2) if prev_close else 0
             change_pct = round((change / prev_close) * 100, 2) if prev_close else 0
 
-            # Map currency to symbol
-            currency_symbols = {"USD": "$", "EUR": "€", "GBP": "£", "ILS": "₪", "JPY": "¥", "BTC": "₿"}
-            currency_symbol = currency_symbols.get(currency, currency)
+            currency_symbol = _CURRENCY_SYMBOLS.get(currency, currency)
 
-            self._attr_unit_of_measurement = currency
+            self._attr_native_unit_of_measurement = currency
             self._data = {
                 "symbol": self._symbol,
                 "short_name": name,
@@ -338,11 +393,17 @@ class LuminaStockSensor(SensorEntity):
                 "trending": "up" if change >= 0 else "down",
                 "exchange": exchange,
             }
+            self._attr_available = True
 
         except asyncio.TimeoutError:
             _LOGGER.warning("Lumina Feeds: Timeout fetching stock %s", self._symbol)
+            self._attr_available = False
+        except aiohttp.ClientError as err:
+            _LOGGER.warning("Lumina Feeds: Network error fetching stock %s: %s", self._symbol, err)
+            self._attr_available = False
         except Exception as err:
             _LOGGER.error("Lumina Feeds: Error fetching stock %s: %s", self._symbol, err)
+            self._attr_available = False
 
 
 # ═══════════════════════════════════════════════════════
@@ -356,17 +417,24 @@ class LuminaStockSummarySensor(SensorEntity):
     _attr_icon = "mdi:finance"
     _attr_name = "Lumina Stocks Summary"
     _attr_should_poll = False
+    # `stocks` is ~10 entries × 9 fields; keep it out of the recorder.
+    _unrecorded_attributes = frozenset({"stocks"})
 
     def __init__(self, session, symbols, scan_interval, entry_id):
         self._session = session
         self._symbols = symbols
         self._scan_minutes = scan_interval
         self._stocks: list[dict[str, Any]] = []
+        self._attr_available = True
         self._attr_unique_id = f"lumina_stocks_summary_{entry_id[:8]}"
 
     @property
-    def state(self) -> str:
-        return f"{len(self._stocks)} stocks"
+    def state(self) -> int:
+        return len(self._stocks)
+
+    @property
+    def unit_of_measurement(self) -> str:
+        return "stocks"
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -388,50 +456,61 @@ class LuminaStockSummarySensor(SensorEntity):
         self.async_write_ha_state()
 
     async def async_update(self) -> None:
-        """Fetch all stocks using individual v8 chart API calls."""
-        currency_symbols = {"USD": "$", "EUR": "€", "GBP": "£", "ILS": "₪", "JPY": "¥", "BTC": "₿"}
-        stocks = []
-
-        for symbol in self._symbols:
-            try:
-                url = YAHOO_CHART_URL.format(symbol=symbol)
-                async with self._session.get(
-                    url, headers=YAHOO_HEADERS, timeout=aiohttp.ClientTimeout(total=15),
-                ) as resp:
-                    if resp.status != 200:
-                        _LOGGER.warning("Lumina Feeds: HTTP %s for summary stock %s", resp.status, symbol)
-                        continue
-                    data = await resp.json()
-
-                chart = data.get("chart", {})
-                result = chart.get("result", [])
-                if not result:
-                    continue
-
-                meta = result[0].get("meta", {})
-                price = meta.get("regularMarketPrice", 0)
-                prev_close = meta.get("chartPreviousClose", 0) or meta.get("previousClose", 0)
-                currency = meta.get("currency", "USD")
-                name = meta.get("shortName", "") or meta.get("symbol", symbol)
-
-                change = round(price - prev_close, 2) if prev_close else 0
-                change_pct = round((change / prev_close) * 100, 2) if prev_close else 0
-
-                stocks.append({
-                    "symbol": symbol,
-                    "short_name": name,
-                    "price": round(price, 2),
-                    "change": change,
-                    "change_percent": change_pct,
-                    "currency": currency,
-                    "currency_symbol": currency_symbols.get(currency, currency),
-                    "trending": "up" if change >= 0 else "down",
-                    "market_state": meta.get("marketState", "CLOSED"),
-                })
-
-            except asyncio.TimeoutError:
-                _LOGGER.warning("Lumina Feeds: Timeout fetching summary stock %s", symbol)
-            except Exception as err:
-                _LOGGER.error("Lumina Feeds: Error fetching summary stock %s: %s", symbol, err)
-
+        """Fetch all stocks concurrently using v8 chart API."""
+        results = await asyncio.gather(
+            *(self._fetch_one(s) for s in self._symbols),
+            return_exceptions=True,
+        )
+        stocks = [r for r in results if isinstance(r, dict)]
         self._stocks = stocks
+        # Available as long as we got at least one — partial outages still
+        # produce useful data for the cards that consume this sensor.
+        self._attr_available = bool(stocks) or not self._symbols
+
+    async def _fetch_one(self, symbol: str) -> dict[str, Any] | None:
+        """Fetch a single stock; returns None on any error (logged)."""
+        try:
+            url = YAHOO_CHART_URL.format(symbol=symbol)
+            async with self._session.get(
+                url, headers=YAHOO_HEADERS, timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status != 200:
+                    _LOGGER.warning("Lumina Feeds: HTTP %s for summary stock %s", resp.status, symbol)
+                    return None
+                data = await resp.json()
+
+            chart = data.get("chart", {})
+            result = chart.get("result", [])
+            if not result:
+                return None
+
+            meta = result[0].get("meta", {})
+            price = meta.get("regularMarketPrice", 0)
+            prev_close = meta.get("chartPreviousClose", 0) or meta.get("previousClose", 0)
+            currency = meta.get("currency", "USD")
+            name = meta.get("shortName", "") or meta.get("symbol", symbol)
+
+            change = round(price - prev_close, 2) if prev_close else 0
+            change_pct = round((change / prev_close) * 100, 2) if prev_close else 0
+
+            return {
+                "symbol": symbol,
+                "short_name": name,
+                "price": round(price, 2),
+                "change": change,
+                "change_percent": change_pct,
+                "currency": currency,
+                "currency_symbol": _CURRENCY_SYMBOLS.get(currency, currency),
+                "trending": "up" if change >= 0 else "down",
+                "market_state": meta.get("marketState", "CLOSED"),
+            }
+
+        except asyncio.TimeoutError:
+            _LOGGER.warning("Lumina Feeds: Timeout fetching summary stock %s", symbol)
+            return None
+        except aiohttp.ClientError as err:
+            _LOGGER.warning("Lumina Feeds: Network error fetching summary stock %s: %s", symbol, err)
+            return None
+        except Exception as err:
+            _LOGGER.error("Lumina Feeds: Error fetching summary stock %s: %s", symbol, err)
+            return None
