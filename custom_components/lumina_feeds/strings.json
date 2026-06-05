@@ -57,7 +57,13 @@
       }
     },
     "error": {
-      "no_results": "No results found. Try a different search term."
+      "no_results": "No results found. Try a different search term.",
+      "unsafe_url": "That URL points at a private/internal address and was rejected for safety. Please use a public RSS feed URL.",
+      "invalid_url": "That doesn't look like a valid http(s) URL.",
+      "invalid_symbol": "One or more symbols don't look like valid Yahoo Finance tickers (letters, digits, '^', '.', '=', '-').",
+      "too_many_interests": "Too many interests — please keep it under 50.",
+      "too_many_symbols": "Too many symbols — please keep it under 100.",
+      "line_too_long": "One of your lines is too long (max 500 characters)."
     }
   }
 }
